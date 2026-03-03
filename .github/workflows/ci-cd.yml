@@ -1,0 +1,196 @@
+name: CI/CD to AKS
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Deployment target"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+        default: staging
+
+permissions:
+  contents: read
+  id-token: write
+  security-events: write
+
+env:
+  REGISTRY_NAME: ${{ vars.ACR_NAME }}
+  REGISTRY_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+  IMAGE_NAME: hr-payroll-service
+  HELM_CHART_PATH: helm
+  K8S_NAMESPACE_STAGING: staging
+  K8S_NAMESPACE_PRODUCTION: production
+  HELM_RELEASE_NAME: hr-payroll-service
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        if: ${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install Node dependencies
+        if: ${{ hashFiles('package-lock.json') != '' }}
+        run: npm ci
+
+      - name: Run Node tests
+        if: ${{ hashFiles('package.json') != '' }}
+        run: npm test --if-present
+
+      - name: Set up Python
+        if: ${{ hashFiles('requirements.txt', 'pyproject.toml', 'poetry.lock') != '' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        if: ${{ hashFiles('requirements.txt') != '' }}
+        run: pip install -r requirements.txt
+
+      - name: Run Python tests
+        if: ${{ hashFiles('pytest.ini', 'pyproject.toml', 'tests/**') != '' }}
+        run: pytest
+
+      - name: Set up .NET
+        if: ${{ hashFiles('*.sln', '**/*.csproj') != '' }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Run .NET tests
+        if: ${{ hashFiles('*.sln', '**/*.csproj') != '' }}
+        run: dotnet test --configuration Release
+
+  build_push:
+    name: Build and push Docker image to ACR
+    runs-on: ubuntu-latest
+    needs: test
+    if: ${{ github.event_name != 'pull_request' }}
+    outputs:
+      image_ref: ${{ steps.meta.outputs.image_ref }}
+      deploy_env: ${{ steps.env_selector.outputs.deploy_env }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select deployment environment
+        id: env_selector
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "deploy_env=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            echo "deploy_env=production" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy_env=staging" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Log in to ACR
+        uses: azure/docker-login@v2
+        with:
+          login-server: ${{ env.REGISTRY_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          IMAGE_TAG="${{ github.sha }}"
+          IMAGE_REF="${{ env.REGISTRY_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${IMAGE_TAG}"
+          echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_REF=${IMAGE_REF}" >> "$GITHUB_ENV"
+
+      - name: Build and push image
+        run: |
+          docker build -t "$IMAGE_REF" .
+          docker push "$IMAGE_REF"
+
+  trivy_scan:
+    name: Trivy image scan
+    runs-on: ubuntu-latest
+    needs: build_push
+    if: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - name: Run Trivy scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ needs.build_push.outputs.image_ref }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Upload Trivy SARIF report
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+  deploy:
+    name: Deploy to AKS with Helm
+    runs-on: ubuntu-latest
+    needs:
+      - build_push
+      - trivy_scan
+    if: ${{ github.event_name != 'pull_request' }}
+    environment: ${{ needs.build_push.outputs.deploy_env }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Select namespace
+        id: ns
+        run: |
+          if [ "${{ needs.build_push.outputs.deploy_env }}" = "production" ]; then
+            echo "namespace=${{ env.K8S_NAMESPACE_PRODUCTION }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "namespace=${{ env.K8S_NAMESPACE_STAGING }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install "${{ env.HELM_RELEASE_NAME }}" "${{ env.HELM_CHART_PATH }}" \
+            --namespace "${{ steps.ns.outputs.namespace }}" \
+            --create-namespace \
+            --set image.repository="${{ env.REGISTRY_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}" \
+            --set image.tag="${{ github.sha }}" \
+            -f "${{ env.HELM_CHART_PATH }}/values-${{ needs.build_push.outputs.deploy_env }}.yaml"
