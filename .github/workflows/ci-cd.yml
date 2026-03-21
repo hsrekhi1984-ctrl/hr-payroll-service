@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Deployment target"
+        description: Deployment target
         required: true
         type: choice
         options:
@@ -36,50 +36,25 @@ env:
 
 jobs:
   test:
-    name: Run tests
+    name: Run .NET tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node
-        if: ${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock') != '' }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-
-      - name: Install Node dependencies
-        if: ${{ hashFiles('package-lock.json') != '' }}
-        run: npm ci
-
-      - name: Run Node tests
-        if: ${{ hashFiles('package.json') != '' }}
-        run: npm test --if-present
-
-      - name: Set up Python
-        if: ${{ hashFiles('requirements.txt', 'pyproject.toml', 'poetry.lock') != '' }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python dependencies
-        if: ${{ hashFiles('requirements.txt') != '' }}
-        run: pip install -r requirements.txt
-
-      - name: Run Python tests
-        if: ${{ hashFiles('pytest.ini', 'pyproject.toml', 'tests/**') != '' }}
-        run: pytest
-
       - name: Set up .NET
-        if: ${{ hashFiles('*.sln', '**/*.csproj') != '' }}
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "8.0.x"
+          dotnet-version: 8.0.x
 
-      - name: Run .NET tests
-        if: ${{ hashFiles('*.sln', '**/*.csproj') != '' }}
-        run: dotnet test --configuration Release
+      - name: Restore solution
+        run: dotnet restore HRPayroll.sln
+
+      - name: Build solution
+        run: dotnet build HRPayroll.sln --configuration Release --no-restore
+
+      - name: Run tests
+        run: dotnet test HRPayroll.sln --configuration Release --no-build
 
   build_push:
     name: Build and push Docker image to ACR
@@ -89,6 +64,7 @@ jobs:
     outputs:
       image_ref: ${{ steps.meta.outputs.image_ref }}
       deploy_env: ${{ steps.env_selector.outputs.deploy_env }}
+      deploy_enabled: ${{ steps.deploy_assets.outputs.enabled }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -102,6 +78,16 @@ jobs:
             echo "deploy_env=production" >> "$GITHUB_OUTPUT"
           else
             echo "deploy_env=staging" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check deployment assets
+        id: deploy_assets
+        run: |
+          if [ -f "${{ env.HELM_CHART_PATH }}/Chart.yaml" ] && [ -f "${{ env.HELM_CHART_PATH }}/values-${{ steps.env_selector.outputs.deploy_env }}.yaml" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Helm chart or values file not found; deployment job will be skipped."
           fi
 
       - name: Azure login
@@ -143,7 +129,7 @@ jobs:
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
-          exit-code: "1"
+          exit-code: '1'
 
       - name: Upload Trivy SARIF report
         uses: github/codeql-action/upload-sarif@v3
@@ -157,7 +143,7 @@ jobs:
     needs:
       - build_push
       - trivy_scan
-    if: ${{ github.event_name != 'pull_request' }}
+    if: ${{ github.event_name != 'pull_request' && needs.build_push.outputs.deploy_enabled == 'true' }}
     environment: ${{ needs.build_push.outputs.deploy_env }}
     steps:
       - name: Checkout
