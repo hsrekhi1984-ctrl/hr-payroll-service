@@ -1,182 +1,218 @@
-name: CI/CD to AKS
+name: CI/CD Automation
 
 on:
-  push:
-    branches:
-      - main
-      - development
   pull_request:
-    branches:
-      - main
-      - development
+    branches: [main, development]
+  push:
+    branches: [main, development]
   workflow_dispatch:
     inputs:
-      environment:
-        description: Deployment target
+      target_environment:
+        description: "Environment to deploy"
         required: true
         type: choice
         options:
           - staging
           - production
-        default: staging
-
-permissions:
-  contents: read
-  id-token: write
-  security-events: write
 
 env:
-  REGISTRY_NAME: ${{ vars.ACR_NAME }}
-  REGISTRY_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+  DOTNET_VERSION: 8.0.x
   IMAGE_NAME: hr-payroll-service
-  HELM_CHART_PATH: helm
-  K8S_NAMESPACE_STAGING: staging
-  K8S_NAMESPACE_PRODUCTION: production
-  HELM_RELEASE_NAME: hr-payroll-service
+  HELM_VALUES_PATH: ./helm/hr-payroll-service
+  HELM_REUSABLE_CHART_PATH: ./hr-helm-charts/helm/microservice-base
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   test:
-    name: Run .NET tests
+    name: Run tests
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Restore solution
+      - name: Restore
         run: dotnet restore HRPayroll.sln
 
-      - name: Build solution
+      - name: Build
         run: dotnet build HRPayroll.sln --configuration Release --no-restore
 
-      - name: Run tests
+      - name: Test
         run: dotnet test HRPayroll.sln --configuration Release --no-build
 
-  build_push:
-    name: Build and push Docker image to ACR
+  build_and_push:
+    name: Build and push Docker image
     runs-on: ubuntu-latest
     needs: test
-    if: ${{ github.event_name != 'pull_request' }}
     outputs:
-      image_ref: ${{ steps.meta.outputs.image_ref }}
-      deploy_env: ${{ steps.env_selector.outputs.deploy_env }}
-      deploy_enabled: ${{ steps.deploy_assets.outputs.enabled }}
+      tag: ${{ steps.meta.outputs.tag }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Select deployment environment
-        id: env_selector
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "deploy_env=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.ref_name }}" = "main" ]; then
-            echo "deploy_env=production" >> "$GITHUB_OUTPUT"
-          else
-            echo "deploy_env=staging" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Check deployment assets
-        id: deploy_assets
-        run: |
-          if [ -f "${{ env.HELM_CHART_PATH }}/Chart.yaml" ] && [ -f "${{ env.HELM_CHART_PATH }}/values-${{ steps.env_selector.outputs.deploy_env }}.yaml" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "Helm chart or values file not found; deployment job will be skipped."
-          fi
-
-      - name: Azure login
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Log in to ACR
-        uses: azure/docker-login@v2
-        with:
-          login-server: ${{ env.REGISTRY_LOGIN_SERVER }}
-          username: ${{ secrets.ACR_USERNAME }}
-          password: ${{ secrets.ACR_PASSWORD }}
-
-      - name: Generate image metadata
+      - name: Resolve image metadata
         id: meta
+        shell: bash
         run: |
-          IMAGE_TAG="${{ github.sha }}"
-          IMAGE_REF="${{ env.REGISTRY_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${IMAGE_TAG}"
-          echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
-          echo "IMAGE_REF=${IMAGE_REF}" >> "$GITHUB_ENV"
-
-      - name: Build and push image
+          if [[ "${{ github.ref }}" == "refs/heads/main" || "${{ github.event.inputs.target_environment }}" == "production" ]]; then
+            DEPLOY_ENV="production"
+          else
+            DEPLOY_ENV="staging"
+          fi
+          IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}"
+          TAG="${DEPLOY_ENV}-${GITHUB_SHA}"
+          FULL_IMAGE="${IMAGE}:${TAG}"
+          echo "IMAGE=$IMAGE"
+          echo "TAG=$TAG"
+          echo "FULL_IMAGE=$FULL_IMAGE"
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "full_image=$FULL_IMAGE" >> $GITHUB_OUTPUT
+      - name: Debug image info
         run: |
-          docker build -t "$IMAGE_REF" .
-          docker push "$IMAGE_REF"
-
-  trivy_scan:
-    name: Trivy image scan
-    runs-on: ubuntu-latest
-    needs: build_push
-    if: ${{ github.event_name != 'pull_request' }}
-    steps:
-      - name: Run Trivy scan
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: ${{ needs.build_push.outputs.image_ref }}
-          format: sarif
-          output: trivy-results.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: '1'
-
-      - name: Upload Trivy SARIF report
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: trivy-results.sarif
-
-  deploy:
-    name: Deploy to AKS with Helm
-    runs-on: ubuntu-latest
-    needs:
-      - build_push
-      - trivy_scan
-    if: ${{ github.event_name != 'pull_request' && needs.build_push.outputs.deploy_enabled == 'true' }}
-    environment: ${{ needs.build_push.outputs.deploy_env }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+          echo "Image: ${{ steps.meta.outputs.image }}"
+          echo "Tag: ${{ steps.meta.outputs.tag }}"
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Azure login
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          creds: ${{ secrets.AZURE_CREDENTIALS_JSON }}
+
+      - name: Build and push image via ACR Tasks
+        shell: bash
+        run: |
+          ACR_NAME="${{ secrets.ACR_LOGIN_SERVER }}"
+          ACR_NAME="${ACR_NAME%%.*}"
+          az acr build \
+            --registry "$ACR_NAME" \
+            --image "${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}" \
+            --image "${{ env.IMAGE_NAME }}:latest" \
+            --file Dockerfile \
+            .
+  trivy_scan:
+    name: Scan image with Trivy
+    runs-on: ubuntu-latest
+    needs: build_and_push
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Show image tag to be scanned
+        run: |
+          echo "Building and scanning image locally with tag:"
+          echo "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ needs.build_and_push.outputs.tag }}"
+      - name: Build image locally for scan
+        run: |
+          docker build -t local-scan:${{ needs.build_and_push.outputs.tag }} -f Dockerfile .
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: local-scan:${{ needs.build_and_push.outputs.tag }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+  deploy_staging:
+    name: Deploy to AKS (staging)
+    runs-on: ubuntu-latest
+    needs: [build_and_push, trivy_scan]
+    if: |
+      github.ref == 'refs/heads/develop' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target_environment == 'staging')
+    environment: staging
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Checkout Helm charts
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/hr-helm-charts
+          path: hr-helm-charts
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS_JSON }}
 
       - name: Set AKS context
         uses: azure/aks-set-context@v4
         with:
-          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
-          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          resource-group: ${{ secrets.AZURE_RG_STAGING }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_STAGING }}          
+
+      - name: Install kubelogin
+        uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: 'latest'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Convert kubeconfig
+        run: kubelogin convert-kubeconfig -l azurecli      
 
       - name: Setup Helm
         uses: azure/setup-helm@v4
 
-      - name: Select namespace
-        id: ns
+      - name: Deploy
         run: |
-          if [ "${{ needs.build_push.outputs.deploy_env }}" = "production" ]; then
-            echo "namespace=${{ env.K8S_NAMESPACE_PRODUCTION }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "namespace=${{ env.K8S_NAMESPACE_STAGING }}" >> "$GITHUB_OUTPUT"
-          fi
+          kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
+          helm upgrade --install hr-payroll-service ${{ env.HELM_REUSABLE_CHART_PATH }} \
+            --namespace staging \
+            --set image.repository=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build_and_push.outputs.tag }} \
+            --set environment=staging \
+            -f ${{ env.HELM_VALUES_PATH }}/values-staging.yaml
+  deploy_production:
+    name: Deploy to AKS (production)
+    runs-on: ubuntu-latest
+    needs: [build_and_push, trivy_scan]
+    if: |
+      github.ref == 'refs/heads/main' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target_environment == 'production')
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
 
-      - name: Deploy with Helm
+      - name: Checkout Helm charts
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/hr-helm-charts
+          path: hr-helm-charts
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS_JSON }}
+
+      - name: Install kubelogin
+        uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: 'latest'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ secrets.AZURE_RG_PRODUCTION }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_PRODUCTION }}
+          use-kubelogin: true
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Deploy
         run: |
-          helm upgrade --install "${{ env.HELM_RELEASE_NAME }}" "${{ env.HELM_CHART_PATH }}" \
-            --namespace "${{ steps.ns.outputs.namespace }}" \
-            --create-namespace \
-            --set image.repository="${{ env.REGISTRY_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}" \
-            --set image.tag="${{ github.sha }}" \
-            -f "${{ env.HELM_CHART_PATH }}/values-${{ needs.build_push.outputs.deploy_env }}.yaml"
+          kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+          helm upgrade --install hr-payroll-service ${{ env.HELM_REUSABLE_CHART_PATH }} \
+            --namespace production \
+            --set image.repository=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build_and_push.outputs.tag }} \
+            --set environment=production \
+            -f ${{ env.HELM_VALUES_PATH }}/values-production.yaml
