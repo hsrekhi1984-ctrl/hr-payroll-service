@@ -1,0 +1,27 @@
+service:
+  name: hr-payroll-service
+  port: 80
+  containerPort: 8080
+
+image:
+  repository: acr.example.azurecr.io/hr-payroll-service
+  tag: "1.0.0"
+
+replicaCount: 2
+
+ingress:
+  enabled: true
+  className: nginx
+  host: hr-payroll-service.example.com
+  path: /
+  pathType: Prefix
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+
+env:
+  ASPNETCORE_ENVIRONMENT: Production
+  ASPNETCORE_URLS: http://+:8080
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.monitoring:4317
+
+secretEnv:
+  ConnectionStrings__PostgreSql: "Host=postgresql.hr.svc.cluster.local;Port=5432;Database=payroll_db;Username=payroll_user;Password=change-me"
