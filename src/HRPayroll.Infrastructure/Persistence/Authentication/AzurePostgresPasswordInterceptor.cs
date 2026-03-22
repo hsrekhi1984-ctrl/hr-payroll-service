@@ -40,7 +40,17 @@ public sealed class AzurePostgresPasswordInterceptor : DbConnectionInterceptor
         }
 
         var token = await credential.GetTokenAsync(TokenRequestContext, cancellationToken);
-        npgsqlConnection.Password = token.Token;
+        ApplyPassword(npgsqlConnection, token.Token);
+    }
+
+    private static void ApplyPassword(NpgsqlConnection connection, string password)
+    {
+        var connectionStringBuilder = new NpgsqlConnectionStringBuilder(connection.ConnectionString)
+        {
+            Password = password
+        };
+
+        connection.ConnectionString = connectionStringBuilder.ConnectionString;
     }
 
     public void SetPassword(DbConnection connection)
@@ -51,6 +61,6 @@ public sealed class AzurePostgresPasswordInterceptor : DbConnectionInterceptor
         }
 
         var token = credential.GetToken(TokenRequestContext, CancellationToken.None);
-        npgsqlConnection.Password = token.Token;
+        ApplyPassword(npgsqlConnection, token.Token);
     }
 }
