@@ -24,7 +24,7 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddHealthChecks()
     .AddNpgSql(sp =>
     {
-        var connection = new NpgsqlConnection(builder.Configuration.GetConnectionString("PayrollDb"));
+        var connection = new NpgsqlConnection(builder.Configuration.GetPayrollConnectionString());
         sp.GetRequiredService<AzurePostgresPasswordInterceptor>().SetPassword(connection);
         return connection.ConnectionString;
     });

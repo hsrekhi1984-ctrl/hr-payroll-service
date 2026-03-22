@@ -20,7 +20,7 @@ public static class ServiceCollectionExtensions
 
         services.AddDbContext<PayrollDbContext>((serviceProvider, options) =>
         {
-            options.UseNpgsql(configuration.GetConnectionString("PayrollDb"));
+            options.UseNpgsql(configuration.GetPayrollConnectionString());
             options.AddInterceptors(serviceProvider.GetRequiredService<AzurePostgresPasswordInterceptor>());
         });
 

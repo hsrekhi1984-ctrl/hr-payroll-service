@@ -24,4 +24,4 @@ env:
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.monitoring:4317
 
 secretEnv:
-  ConnectionStrings__PostgreSql: "host=psql-hrmsdev-dtg9s0.postgres.database.azure.com port=5432 dbname=postgres user=aks-hrmsdev-identity sslmode=require"
+  ConnectionStrings__PayrollDb: "host=psql-hrmsdev-dtg9s0.postgres.database.azure.com port=5432 dbname=postgres user=aks-hrmsdev-identity sslmode=require"
