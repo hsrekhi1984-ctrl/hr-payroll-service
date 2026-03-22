@@ -1,6 +1,8 @@
 using HRPayroll.Application;
 using HRPayroll.Infrastructure.Extensions;
 using HRPayroll.Infrastructure.Persistence;
+using HRPayroll.Infrastructure.Persistence.Authentication;
+using Npgsql;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -20,7 +22,12 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 builder.Services.AddHealthChecks()
-    .AddNpgSql(builder.Configuration.GetConnectionString("PayrollDb")!);
+    .AddNpgSql(sp =>
+    {
+        var connection = new NpgsqlConnection(builder.Configuration.GetConnectionString("PayrollDb"));
+        sp.GetRequiredService<AzurePostgresPasswordInterceptor>().SetPassword(connection);
+        return connection;
+    });
 
 builder.Services.AddOpenTelemetry()
     .ConfigureResource(resource => resource.AddService("hr-payroll-api"))

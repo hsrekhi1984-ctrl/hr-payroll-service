@@ -1,6 +1,7 @@
 using System.Text;
 using HRPayroll.Application.Abstractions;
 using HRPayroll.Infrastructure.Persistence;
+using HRPayroll.Infrastructure.Persistence.Authentication;
 using HRPayroll.Infrastructure.Repositories;
 using HRPayroll.Infrastructure.Security;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -15,8 +16,13 @@ public static class ServiceCollectionExtensions
 {
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
-        services.AddDbContext<PayrollDbContext>(options =>
-            options.UseNpgsql(configuration.GetConnectionString("PayrollDb")));
+        services.AddSingleton<AzurePostgresPasswordInterceptor>();
+
+        services.AddDbContext<PayrollDbContext>((serviceProvider, options) =>
+        {
+            options.UseNpgsql(configuration.GetConnectionString("PayrollDb"));
+            options.AddInterceptors(serviceProvider.GetRequiredService<AzurePostgresPasswordInterceptor>());
+        });
 
         services.Configure<JwtOptions>(configuration.GetSection(JwtOptions.SectionName));
         var jwtOptions = configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
