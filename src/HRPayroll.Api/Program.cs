@@ -26,7 +26,7 @@ builder.Services.AddHealthChecks()
     {
         var connection = new NpgsqlConnection(builder.Configuration.GetConnectionString("PayrollDb"));
         sp.GetRequiredService<AzurePostgresPasswordInterceptor>().SetPassword(connection);
-        return connection;
+        return connection.ConnectionString;
     });
 
 builder.Services.AddOpenTelemetry()
